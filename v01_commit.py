@@ -24,8 +24,8 @@ url = 'https://archive.ics.uci.edu/ml/machine-learning-databases/00242/ENB2012_d
 data = pd.read_excel(url)
 
 # Rename columns for easier access
-data.columns = ['X1_Compactness', 'X2_SurfaceArea', 'X3_WallArea', 'X4_RoofArea', 
-                'X5_Height', 'X6_Orientation', 'X7_GlazingArea', 'X8_GlazingDist', 
+data.columns = ['X1_Compactness', 'X2_SurfaceArea', 'X3_WallArea', 'X4_RoofArea',
+                'X5_Height', 'X6_Orientation', 'X7_GlazingArea', 'X8_GlazingDist',
                 'y1_HeatingLoad', 'y2_CoolingLoad']
 
 print(data.head())
@@ -49,7 +49,7 @@ X = data[[
 
 # 2 continuous thermodynamic outputs
 y = data[[
-    'y1_HeatingLoad', 
+    'y1_HeatingLoad',
     'y2_CoolingLoad'
 ]].values
 
@@ -86,23 +86,28 @@ tf.keras.utils.set_random_seed(42)
 # Neural Network (Multi-Layer Perceptron)
 # -------------------------------------------------
 
+# -------------------------------------------------
+# Neural Network (Multi-Layer Perceptron)
+# -------------------------------------------------
+
 model = tf.keras.models.Sequential([
 
     # Input layer: 8 inputs
     tf.keras.layers.Input(shape=(8,)),
 
-    # Hidden layer 1: 64 neurons (ReLU handles non-linear thermodynamics)
-    tf.keras.layers.Dense(64, activation='relu'),
+    # Hidden layer 1: 64 neurons
+    tf.keras.layers.Dense(64),
+    tf.keras.layers.LeakyReLU(alpha=0.01),
 
     # Hidden layer 2: 32 neurons
-    tf.keras.layers.Dense(32, activation='relu'),
+    tf.keras.layers.Dense(32),
+    tf.keras.layers.LeakyReLU(alpha=0.01),
 
     # Output layer: 2 neurons (Linear activation for continuous regression)
     tf.keras.layers.Dense(2, activation='linear')
 ])
 
 model.summary()
-
 
 # -------------------------------------------------
 # Compile Neural Network
@@ -113,10 +118,10 @@ model.compile(
     optimizer=tf.keras.optimizers.Adam(
         learning_rate=0.001
     ),
-    
+
     # MSE is the standard loss function for training regression models
     loss='mean_squared_error',
-    
+
     # MAE is tracked to directly compare with the 2012 Random Forest baseline
     metrics=['mean_absolute_error']
 )
@@ -158,7 +163,7 @@ print(f"\nOverall Test MAE: {test_mae:.4f}")
 # Predict on the test set
 y_pred = model.predict(X_test)
 
-# Calculate MAE for Heating Load (y1) and Cooling Load (y2) separately 
+# Calculate MAE for Heating Load (y1) and Cooling Load (y2) separately
 # to benchmark against the Tsanas paper (0.51 HL and 1.42 CL)
 mae_heating = np.mean(np.abs(y_test[:, 0] - y_pred[:, 0]))
 mae_cooling = np.mean(np.abs(y_test[:, 1] - y_pred[:, 1]))
