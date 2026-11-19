@@ -1,0 +1,227 @@
+% ME G545 Deep Neural Networks - Final Project Report (IEEE double-column)
+% Compile on Overleaf (IEEEtran is built in). Put the PNGs in a folder named figs/.
+% Search for "TODO" before submitting. REWRITE the prose in your own words
+% (similarity must stay below 10%) and verify every reference.
+\documentclass[conference]{IEEEtran}
+\usepackage{cite}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{url}
+\usepackage{textcomp}
+\usepackage[hidelinks]{hyperref}
+
+\begin{document}
+
+\title{Deep Surrogate Modelling of Residential Heating and Cooling Loads: Design Choices, Data Efficiency and Generalisation to Unseen Building Shapes}
+
+\author{\IEEEauthorblockN{Mohammad Rahil}
+\IEEEauthorblockA{Department of Mechanical Engineering\\
+BITS Pilani, Pilani Campus, India\\
+ID: 2025H1410074P | Email: h20250074@pilani.bits-pilani.ac.in}}
+
+\maketitle
+
+\begin{abstract}
+Early-stage building design needs fast estimates of heating load (HL) and cooling load (CL), but detailed simulation is slow. This work studies a multi-output multilayer perceptron (MLP) as a surrogate for the simulated Energy Efficiency (ENB2012) dataset of 768 residential buildings. We (i) run a one-factor-at-a-time study of architecture, activation, optimiser, learning rate, regularisation and feature encoding, (ii) benchmark the tuned MLP against linear regression, random forest (RF) and XGBoost, with the baselines tuned by nested cross-validation, and (iii) test data efficiency and generalisation to building shapes not seen in training. Under repeated 10-fold cross-validation the tuned MLP reaches a mean absolute error (MAE) of 0.29 and 0.42~kWh/m$^2$~for HL and CL, well below the 0.51 and 1.42 reported for the original random forest, but tuned XGBoost is better still (0.19 and 0.36). When whole building shapes are held out, all nonlinear models degrade by roughly an order of magnitude and a linear model is competitive. Removing geometry features derived from the shape reduces the MLP's unseen-shape error, though the evidence is only suggestive. We conclude that random cross-validation on this dataset overstates how reliably a surrogate transfers to new geometries.
+\end{abstract}
+
+\begin{IEEEkeywords}
+building energy, heating load, cooling load, surrogate model, multilayer perceptron, gradient boosting, generalisation
+\end{IEEEkeywords}
+
+%--------------------------------------------------------------------
+\section{Introduction}
+Sizing heating, ventilation and air-conditioning (HVAC) equipment requires estimates of a building's heating and cooling loads at the design stage. Physics-based simulation tools provide such estimates, but every design variant requires a new simulation and some expertise in the tool~\cite{tsanas}. Data-driven surrogates trained on simulation results can return estimates almost instantly, which is attractive for exploring many design alternatives.
+
+The ENB2012 dataset introduced by Tsanas and Xifara~\cite{tsanas} has become a standard benchmark for this task. Because it is small and noise-free, models quickly reach very high accuracy, so headline accuracy alone says little. This project therefore asks a more careful question: \emph{how reliable is a deep surrogate for this problem, which design choices matter, how much data does it need, and how does it behave on geometries absent from training?}
+
+The contributions are:
+\begin{itemize}
+\item a systematic one-factor-at-a-time study of 15 MLP configurations;
+\item a comparison with linear regression, RF and XGBoost, where both tree models are tuned inside a nested cross-validation (CV) loop and compared fold-by-fold with the MLP;
+\item a data-efficiency curve and a leave-one-shape-out test, including a feature-reduction remedy.
+\end{itemize}
+All code is available at \href{https://github.com/RahilProjects/DNN_Project}{github.com/RahilProjects/DNN\_Project}.
+
+%--------------------------------------------------------------------
+\section{Related Work}
+Tsanas and Xifara~\cite{tsanas} compared iteratively reweighted least squares with random forests on this dataset and reported MAE of 0.51 (HL) and 1.42 (CL) for the forest. Subsequent studies applied many other learners to the same 768 buildings, including support vector regression, neural networks, decision-tree models and ensembles~\cite{chou}, evolutionary multivariate adaptive regression splines~\cite{cheng}, and neural networks combined with cluster analysis~\cite{aqlan}. Tree ensembles and boosting have repeatedly been reported as strong performers on this data~\cite{ensemble,rte}. More recent comparisons place MLPs and deep networks next to classical learners; one such study reports random forest and support vector regression as most accurate for heating load, while a small MLP is competitive on cooling load~\cite{atici}. Beyond accuracy, one study combined a neural network with design-of-experiments sensitivity analysis to identify an energy-efficient design~\cite{han}.
+
+In the studies we reviewed, performance is mostly reported under random train/test or cross-validation splits. Less attention is given to how individual design choices affect a deep surrogate, how much data it needs, and how it behaves on building shapes that were not part of the training set. This work addresses those questions.
+
+%--------------------------------------------------------------------
+\section{Dataset and Data Analysis}
+The dataset contains 768 simulated residential buildings generated with Ecotect for a location in Athens, Greece~\cite{tsanas}. Twelve building forms of identical volume (771.75~m$^3$) were combined with three glazing areas, five glazing distributions and four orientations, plus unglazed variants, giving $12\times3\times5\times4+12\times4=768$ samples. There are eight inputs: relative compactness (X1), surface area (X2), wall area (X3), roof area (X4), overall height (X5), orientation (X6), glazing area (X7) and glazing-area distribution (X8). The two targets are HL (Y1) and CL (Y2), in kWh/m$^2$~(HL about 6--43, CL about 11--48). No values are missing.
+
+Three properties of the data matter for modelling. (i) Because volume is fixed, X1 and X2 are perfectly rank-correlated ($\rho=-1$), and X4 and X5 are almost inversely related ($\rho=-0.94$)~\cite{tsanas}. (ii) Orientation (X6) and glazing distribution (X8) have very weak association with the loads~\cite{tsanas}. (iii) There are only \emph{twelve distinct geometries}: each geometry is fixed by X1 (and hence X2--X5), so most of the variation between samples comes from glazing and orientation. This last point is central to the generalisation results in Section~\ref{sec:loso}.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figs/EDA.png}
+\caption{Distributions of HL and CL and Spearman correlation matrix of inputs and outputs.}\label{fig:eda}
+\end{figure}
+
+%--------------------------------------------------------------------
+\section{Methodology}
+\subsection{Preprocessing}
+Inputs and both targets are standardised using the mean and standard deviation of the \emph{training} portion only, inside every fold, so no information from the test data enters the scaler. Predictions are transformed back to kWh/m$^2$ before computing errors. Scaling the targets prevents the larger-variance CL from dominating the loss.
+
+\subsection{MLP surrogate}
+The model is a fully connected network with eight inputs, ReLU hidden layers and two linear outputs (HL and CL), so one network predicts both loads. The loss is mean squared error, which suits continuous regression, and training uses Adam~\cite{kingma} with batch size 32 and an L2 penalty of $10^{-4}$. A random 15\% of each training fold is held out as a validation set for early stopping (patience 30 epochs, best weights restored, at most 300 epochs), and the learning rate is halved after 15 epochs without improvement. The baseline configuration is $[128,64,32]$ with learning rate $10^{-3}$; the final model uses $[256,128,64,32]$ and a learning rate of $3\times10^{-3}$, chosen from the study in Section~\ref{sec:ablation}.
+
+\subsection{Baselines}
+We use ordinary linear regression, a random forest~\cite{breiman}, and XGBoost~\cite{chen} (scikit-learn~\cite{sklearn} implementations of the first two). For the final comparison, RF and XGBoost are tuned for each target separately by randomised search (10 and 15 candidates, 3-fold inner CV) \emph{inside} each outer training fold, so the test folds never influence tuning. The tuned XGBoost typically selected depth 6--7, learning rate 0.09--0.13 and about 700--800 trees (median over folds).
+
+\subsection{Evaluation protocol}
+Three protocols are used. (a) The ablation study uses 5-fold CV repeated twice (seed 42). (b) The final comparison uses a fresh seed (2026) with 10-fold CV repeated three times, with identical splits for every model so that results can be paired fold by fold. (c) Generalisation to new geometries uses leave-one-shape-out (LOSO) CV, holding out all samples of one X1 value (12 folds). Metrics are MAE, MSE, mean relative error and $R^2$; MAE is the main metric because it is easy to interpret and matches the original study~\cite{tsanas}:
+\begin{equation}
+\mathrm{MAE}=\frac{1}{S}\sum_{i}|y_i-\hat y_i|,\quad
+\mathrm{MSE}=\frac{1}{S}\sum_{i}(y_i-\hat y_i)^2 .
+\end{equation}
+Models are compared with the paired Wilcoxon signed-rank test~\cite{wilcoxon} on per-fold MAE. Because folds share training data, these $p$-values are indicative, not exact.
+
+%--------------------------------------------------------------------
+\section{Experiments and Results}
+\subsection{Effect of design choices}\label{sec:ablation}
+Table~\ref{tab:ablation} changes one factor at a time from the baseline. Capacity and learning rate matter most: a single 32-unit layer is unstable and poor, error falls steadily with depth and width, and a learning rate of $3\times10^{-3}$ gave the lowest error. ReLU outperformed tanh, SiLU was unstable (large fold-to-fold spread), and neither SGD with momentum nor AdamW improved on Adam. Removing L2 or adding dropout (0.1) increased error, which is plausible for a noise-free simulated dataset where there is little noise to regularise against. Dropping the collinear X2 changed nothing for HL (0.403 vs.\ 0.403), whereas one-hot encoding orientation, and especially also the glazing distribution, hurt. We did not investigate why, so we report it as an observation only. Fig.~\ref{fig:complexity} shows error versus parameter count.
+
+\begin{table}[t]
+\caption{One-factor-at-a-time study (5-fold $\times$ 2; MAE in kWh/m$^2$, mean $\pm$ std over folds).}\label{tab:ablation}
+\centering\footnotesize
+\begin{tabular}{lcc}
+\toprule
+Configuration & HL MAE & CL MAE \\
+\midrule
+Base $[128,64,32]$, ReLU, Adam & $0.403\pm0.031$ & $0.646\pm0.079$ \\
+Arch $[32]$ & $1.138\pm0.537$ & $1.590\pm0.437$ \\
+Arch $[64,32]$ & $0.471\pm0.055$ & $0.829\pm0.081$ \\
+Arch $[256,128,64,32]$ & $0.355\pm0.041$ & $0.527\pm0.057$ \\
+tanh & $0.454\pm0.044$ & $0.742\pm0.075$ \\
+SiLU & $0.627\pm0.485$ & $1.134\pm0.462$ \\
+AdamW & $0.462\pm0.041$ & $0.766\pm0.061$ \\
+SGD + momentum ($10^{-2}$) & $0.524\pm0.071$ & $0.873\pm0.110$ \\
+lr $3\times10^{-4}$ & $0.493\pm0.057$ & $0.816\pm0.085$ \\
+lr $3\times10^{-3}$ & $\mathbf{0.318}\pm0.023$ & $\mathbf{0.495}\pm0.050$ \\
+No L2 & $0.487\pm0.055$ & $0.802\pm0.084$ \\
+Dropout 0.1 & $0.509\pm0.078$ & $0.720\pm0.124$ \\
+One-hot orientation & $0.537\pm0.068$ & $0.777\pm0.093$ \\
+One-hot orient.\ + glazing dist. & $1.331\pm0.743$ & $1.571\pm0.859$ \\
+Drop X2 (collinear) & $0.403\pm0.040$ & $0.705\pm0.095$ \\
+\midrule
+Linear regression & $2.087\pm0.150$ & $2.271\pm0.131$ \\
+Random forest (untuned) & $0.333\pm0.029$ & $1.100\pm0.120$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figs/A_complexity.png}
+\caption{Model complexity versus MAE for the four architectures.}\label{fig:complexity}
+\end{figure}
+
+\subsection{Comparison with tuned baselines}
+Table~\ref{tab:final} and Fig.~\ref{fig:final} compare the final MLP against the tuned baselines on fresh splits (10-fold $\times$ 3). Linear regression is clearly inadequate (MAE about 2.1--2.3), close to the 2.14 and 2.21 reported for the linear model in~\cite{tsanas}, which suggests that our pipeline is consistent with the original study. All nonlinear models beat the original random-forest result (0.51 / 1.42). The MLP reaches MAE 0.29 (HL) and 0.42 (CL), $R^2$ of 0.998 and 0.996.
+
+However, \textbf{tuned XGBoost is better on both targets}: 0.19 and 0.36. In the paired test the MLP beats XGBoost in 0 of 30 folds for HL ($p<0.001$) and in only 6 of 30 for CL ($p<0.001$). The MLP is clearly better than the tuned random forest on CL (30 of 30 folds; 0.42 vs.\ 0.99) and slightly better on HL (20 of 30 folds, $p=0.019$; 0.29 vs.\ 0.31). The XGBoost MSE is also lower (0.090 vs.\ 0.170 for HL; 0.307 vs.\ 0.381 for CL). The ordering is therefore XGBoost $>$ MLP $>$ RF $>$ linear. The practical gap is small (about 0.1 and 0.06~kWh/m$^2$ on loads spanning 6--48~kWh/m$^2$), and the XGBoost advantage holds even though the MLP settings were selected on the same dataset while the trees were tuned in nested CV.
+
+\begin{table}[t]
+\caption{Final comparison, 10-fold CV $\times$ 3, mean over 30 folds. Baselines tuned in nested CV.}\label{tab:final}
+\centering\footnotesize
+\begin{tabular}{lcccc}
+\toprule
+Model & MAE HL & MAE CL & $R^2$ HL & $R^2$ CL \\
+\midrule
+Linear regression & 2.092 & 2.267 & 0.913 & 0.884 \\
+RF (tuned) & 0.314 & 0.991 & 0.998 & 0.971 \\
+MLP (final) & 0.292 & 0.417 & 0.998 & 0.996 \\
+XGBoost (tuned) & \textbf{0.192} & \textbf{0.361} & 0.999 & 0.997 \\
+\midrule
+RF, Tsanas \& Xifara~\cite{tsanas} & 0.51 & 1.42 & -- & -- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figs/3_tuned_baselines.png}
+\caption{MAE (mean $\pm$ std over 30 folds) of the final MLP and tuned/untuned baselines. Dashed line: original random-forest result.}\label{fig:final}
+\end{figure}
+
+\subsection{Data efficiency}
+Fig.~\ref{fig:lc} shows error versus the number of training samples (5-fold, baseline MLP, untuned baselines). With about 60 samples the MLP is worse than both RF and linear regression (HL MAE 2.9 vs.\ 1.3 for RF). On CL the MLP is comparable to RF at 300--430 samples and clearly better only at the full training size (0.67 vs.\ 1.10); on HL, RF is still slightly ahead even then (0.32 vs.\ 0.38). The MLP curve is also noisier than the others, and the point at 70\% of the data has a large spread, which we attribute to unstable training in one fold. A deep surrogate therefore needs several hundred simulations here before it pays off, which is a practical consideration when each sample costs a simulation.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figs/C_learning_curve_fixed.png}
+\caption{Data-efficiency curves (mean $\pm$ std over 5 folds).}\label{fig:lc}
+\end{figure}
+
+\subsection{Generalisation to unseen building shapes}\label{sec:loso}
+Random CV places near-identical buildings in both training and test sets, because the 768 samples come from only twelve geometries. LOSO CV removes that overlap. Table~\ref{tab:loso} and Fig.~\ref{fig:loso} show that errors rise by roughly an order of magnitude for the nonlinear models and $R^2$ becomes negative (mean HL $R^2$ with all features: $-7.9$ for the MLP, $-3.5$ for RF, $-1.2$ for linear regression). With all eight features, the MLP is the worst model (mean MAE 6.9 for HL, 7.1 for CL), with a single shape (X1 = 0.76) producing errors near 30. RF and XGBoost fail on other shapes. The standard deviation across shapes is as large as the mean, so rankings among the nonlinear models are not reliable.
+
+Because X2--X4 are determined by the shape, every held-out shape is novel in several input dimensions at once. We therefore trained the MLP using only X1, X5, X6, X7 and X8. This reduced the mean error by about 40--47\% (HL 6.90 to 3.63; CL 7.11 to 4.17 for a single seed) but a paired test across the 12 shapes gave $p=0.06$--$0.23$, so the improvement is suggestive, not established. A three-seed ensemble gave 4.09 and 4.61, indicating that the single-seed result was partly luck, so the ensemble value is the more reliable estimate. The best performer under LOSO is the \emph{linear} model with reduced features (2.92 and 2.79). Nonlinear models therefore do not extrapolate to new geometries on this dataset.
+
+\begin{table}[t]
+\caption{Leave-one-shape-out MAE, mean (median) over 12 held-out shapes. Random-CV values are from a 12-fold random split for contrast.}\label{tab:loso}
+\centering\footnotesize
+\begin{tabular}{lcc}
+\toprule
+Model & HL & CL \\
+\midrule
+Linear, all 8 & 3.51 (2.11) & 3.93 (2.58) \\
+Linear, reduced & 2.92 (2.47) & 2.79 (2.07) \\
+MLP, all 8 & 6.90 (5.35) & 7.11 (5.72) \\
+MLP, reduced (1 seed) & 3.63 (2.76) & 4.17 (3.68) \\
+MLP, reduced (3-seed ens.) & 4.09 (3.09) & 4.61 (4.00) \\
+RF, all 8 & 4.25 (3.10) & 4.52 (4.30) \\
+RF, reduced & 5.69 (3.44) & 5.84 (4.78) \\
+XGBoost (untuned), all 8 & 5.11 (2.81) & 5.45 (4.20) \\
+\midrule
+\emph{Random CV:} MLP & 0.38 & 0.62 \\
+\emph{Random CV:} RF & 0.30 & 1.08 \\
+\emph{Random CV:} Linear & 2.09 & 2.27 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.85\textwidth]{figs/2_logo_remedies.png}
+\caption{Leave-one-shape-out results: mean and median MAE per model (top) and MAE per held-out shape (bottom).}\label{fig:loso}
+\end{figure*}
+
+%--------------------------------------------------------------------
+\section{Discussion and Limitations}
+Three findings stand out. First, on randomly split data the problem is close to saturated ($R^2\ge0.996$), and tuned gradient boosting is the most accurate model, with the MLP second; boosted trees are known to be strong on small tabular problems. The MLP remains attractive because a single network predicts both loads and is differentiable, which would allow gradient-based design search, although we did not test this. Second, deep networks need several hundred samples to be competitive. Third, and most important for use in design, high random-CV accuracy does not imply reliability on new geometries.
+
+Limitations: (i) the data are simulated and cover only twelve shapes in one climate, so conclusions about real buildings are not supported; (ii) the MLP was tuned by a lighter one-factor-at-a-time search than the nested random search used for the trees; (iii) the learning-curve and LOSO comparisons used untuned baselines, and the LOSO experiment used one run over 12 shapes; (iv) Wilcoxon $p$-values come from overlapping folds; (v) the poor effect of one-hot encoding is unexplained; (vi) the MLP hyper-parameters were selected on the same dataset, which can favour the MLP slightly.
+
+%--------------------------------------------------------------------
+\section{Conclusion}
+A tuned multi-output MLP predicts heating and cooling loads on ENB2012 with MAE of 0.29 and 0.42~kWh/m$^2$, far better than linear regression and the originally published random forest, but it does not beat tuned XGBoost (0.19 and 0.36). Capacity and learning rate were the most influential design choices. The more important result is a caution: all nonlinear models fail on building shapes not seen in training, and a simple feature-reduction step partly helps the MLP. Future work should use data with more geometric diversity, tune all models equally, and test surrogate-based design optimisation.
+
+\section*{Acknowledgment}
+% TODO: acknowledge the course instructor; add an AI-assistance disclosure if the course policy requires one.
+The ENB2012 dataset is from the UCI Machine Learning Repository (CC BY 4.0). Code uses TensorFlow/Keras, scikit-learn and XGBoost.
+
+%--------------------------------------------------------------------
+\begin{thebibliography}{99}
+\bibitem{tsanas} A. Tsanas and A. Xifara, ``Accurate quantitative estimation of energy performance of residential buildings using statistical machine learning tools,'' \emph{Energy and Buildings}, vol. 49, pp. 560--567, 2012.
+\bibitem{chou} J.-S. Chou and D.-K. Bui, ``Modeling heating and cooling loads by artificial intelligence for energy-efficient building design,'' \emph{Energy and Buildings}, vol. 82, pp. 437--446, 2014, doi:10.1016/j.enbuild.2014.07.036.
+\bibitem{cheng} M.-Y. Cheng and M.-T. Cao, ``Accurately predicting building energy performance using evolutionary multivariate adaptive regression splines,'' \emph{Applied Soft Computing}, vol. 22, pp. 178--188, 2014.
+\bibitem{aqlan} F. Aqlan, A. Ahmed, K. Srihari and M. T. Khasawneh, ``Integrating artificial neural networks and cluster analysis to assess energy efficiency of buildings,'' in \emph{Proc. IIE Annual Conf. and Expo}, 2014, pp. 3936--3943.
+\bibitem{ensemble} S. Papadopoulos, E. Azar, W.-L. Woon and C. E. Kontokosta, ``Evaluation of tree-based ensemble learning algorithms for building energy performance estimation,'' \emph{J. Building Performance Simulation}, vol. 11, no. 3, pp. 322--332, 2018, doi:10.1080/19401493.2017.1354919.
+\bibitem{rte} N. Pachauri and C. W. Ahn, ``Regression tree ensemble learning-based prediction of the heating and cooling loads of residential buildings,'' \emph{Building Simulation}, vol. 15, no. 11, pp. 2003--2017, 2022, doi:10.1007/s12273-022-0908-x.
+\bibitem{atici} S. Atıcı and G. Tuna, ``Comparative evaluation of regression models for building energy efficiency assessment based on heating and cooling load requirements,'' \emph{Kırklareli Univ. J. Eng. Sci.}, vol. 11, no. 2, pp. 283--303, 2025, doi:10.34186/klujes.1804525.
+\bibitem{han} S. Sholahudin, A. G. Alam, C. I. Baek and H. Han, ``Prediction and analysis of building energy efficiency using artificial neural network and design of experiments,'' \emph{Applied Mechanics and Materials}, vol. 819, pp. 541--545, 2016, doi:10.4028/www.scientific.net/AMM.819.541.
+\bibitem{kingma} D. P. Kingma and J. Ba, ``Adam: A method for stochastic optimization,'' in \emph{Proc. ICLR}, 2015.
+\bibitem{breiman} L. Breiman, ``Random forests,'' \emph{Machine Learning}, vol. 45, no. 1, pp. 5--32, 2001.
+\bibitem{chen} T. Chen and C. Guestrin, ``XGBoost: A scalable tree boosting system,'' in \emph{Proc. 22nd ACM SIGKDD}, 2016, pp. 785--794.
+\bibitem{sklearn} F. Pedregosa \emph{et al.}, ``Scikit-learn: Machine learning in Python,'' \emph{J. Mach. Learn. Res.}, vol. 12, pp. 2825--2830, 2011.
+\bibitem{wilcoxon} F. Wilcoxon, ``Individual comparisons by ranking methods,'' \emph{Biometrics Bulletin}, vol. 1, no. 6, pp. 80--83, 1945.
+\end{thebibliography}
+
+\end{document}
